@@ -4,6 +4,7 @@ import argparse
 from collections import namedtuple
 import numpy as np
 import pyaudio
+import sys
 import threading
 import zmq
 import zmq.utils.jsonapi as jsonapi
@@ -84,25 +85,62 @@ class AudioOutput(AudioStream):
         data = np.frombuffer(msg[1], dtype=meta.dtype).reshape((-1, meta.channels))
         return (data.astype(np.float32), 0)
 
+def list_devices():
+    n = pa.get_device_count()
+    devices = [pa.get_device_info_by_index(i) for i in range(n)]
+    for device in devices:
+        i = device['index']; name = device['name']
+        ch_in = device['maxInputChannels']; ch_out = device['maxOutputChannels']
+        hz = device['defaultSampleRate']
+        l_in = device['defaultLowInputLatency']; l_out = device['defaultLowOutputLatency']
+        l_in_ms, l_out_ms = (l_in*1000, l_out*1000)
+        l_in_hz, l_out_hz = (l_in*hz, l_out*hz)
+        print('Device #%d: %s' % (i, name))
+        print('%d input, %d output channels' % (ch_in, ch_out))
+        print('%.0f Hz default sample rate' % hz)
+        if ch_in > 0:
+            print('%.3f ms input latency (%.1f samples)' % (l_in_ms, l_in_hz))
+        if ch_out > 0:
+            print('%.3f ms output latency (%.1f samples)' % (l_out_ms, l_out_hz))
+        print()
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('in_out', choices=['input', 'output'],
-                        help='mode: input/server or output/client')
-    parser.add_argument('device', type=int,
-                        help='the audio device id to use')
-    parser.add_argument('endpoint', help='zmq endpoint to use')
+    in_out = parser.add_mutually_exclusive_group(required=True)
+    in_out.add_argument(
+        '-i', type=int, default=-1,
+        help='read from specified audio device number')
+    in_out.add_argument(
+        '-o', type=int, default=-1,
+        help='write to specified audio device number')
+    in_out.add_argument(
+        '-l', action='store_true', help='list audio devices on this system')
+    parser.add_argument(
+        'endpoint', nargs='?', help='the ZMQ endpoint to bind/connect to')
     args = parser.parse_args()
 
-    if args.in_out == 'input':
+    if args.i >= 0:
+        device = args.i
         iam = AudioInput
-    elif args.in_out == 'output':
+    elif args.o >= 0:
+        device = args.o
         iam = AudioOutput
+    elif args.l:
+        list_devices()
+        return
     else:
         raise NotImplementedError('This shouldn\'t happen.')
 
+    if not args.endpoint:
+        print('You must specify a ZMQ endpoint if you specified -i or -o.',
+              file=sys.stderr)
+        print('Examples: "ipc://socket.ipc", "tcp://127.0.0.1:5555"\n',
+              file=sys.stderr)
+        sys.exit(1)
+
     try:
         while True:
-            stream = iam(args.device, args.endpoint)
+            stream = iam(device, args.endpoint)
             stream.remake.wait()
     except KeyboardInterrupt:
         pass
