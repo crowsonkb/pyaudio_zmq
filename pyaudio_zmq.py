@@ -17,12 +17,12 @@ ctx = zmq.Context()
 pa = pyaudio.PyAudio()
 
 class AudioStream:
-    def __init__(self, device, endpoint):
+    def __init__(self, device, endpoint, channels, chunksize, srate):
         self.device = device
         self.endpoint = endpoint
-        self.channels = 2
-        self.chunksize = 256
-        self.srate = 48000
+        self.channels = channels
+        self.chunksize = chunksize
+        self.srate = srate
         self.stream = None
         self.remake = threading.Event()
 
@@ -117,6 +117,15 @@ def main():
         '-l', action='store_true', help='list audio devices on this system')
     parser.add_argument(
         'endpoint', nargs='?', help='the ZMQ endpoint to bind/connect to')
+    parser.add_argument(
+        '--channels', type=int, default=2,
+        help='the number of audio channels to read')
+    parser.add_argument(
+        '--chunksize', type=int, default=256,
+        help='the number of frames to read at once')
+    parser.add_argument(
+        '--srate', type=int, default=48000,
+        help='the sample rate to read')
     args = parser.parse_args()
 
     if args.i >= 0:
@@ -140,7 +149,7 @@ def main():
 
     try:
         while True:
-            stream = iam(device, args.endpoint)
+            stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate)
             stream.remake.wait()
     except KeyboardInterrupt:
         pass
