@@ -4,6 +4,7 @@ import argparse
 from collections import namedtuple
 import logging
 import numpy as np
+import os
 import pyaudio
 import sys
 import threading
@@ -16,7 +17,7 @@ ChunkMeta = namedtuple('ChunkMeta',
 
 logging.basicConfig(format='%(name)s.%(levelname)s:  %(message)s',
                     level=logging.DEBUG)
-logger = logging.getLogger('pyaudio_zmq')
+logger = logging.getLogger(os.path.basename(__file__).rpartition('.')[0])
 
 ctx = zmq.Context()
 pa = pyaudio.PyAudio()
@@ -49,7 +50,7 @@ class AudioStream:
 class AudioInput(AudioStream):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.logger = logging.getLogger('pyaudio_zmq.AudioInput')
+        self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.chunk_seq = 0
         self._open_stream('input')
         self.sock = ctx.socket(zmq.PUB)
@@ -68,7 +69,7 @@ class AudioInput(AudioStream):
 class AudioOutput(AudioStream):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.logger = logging.getLogger('pyaudio_zmq.AudioOutput')
+        self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.sock = ctx.socket(zmq.SUB)
         self.sock.subscribe = b''
         self.sock.connect(self.endpoint)
@@ -167,7 +168,7 @@ def main():
             stream.remake.wait()
             logger.info('Recreating audio stream')
     except KeyboardInterrupt:
-        pass
+        print()
 
 if __name__ == '__main__':
     main()
