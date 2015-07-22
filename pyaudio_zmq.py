@@ -144,6 +144,7 @@ class AudioOutput(AudioStream):
 
         msg = self.chunk_q.get()
         if len(msg[1]) == 0:
+            self.sockstream.stop_on_recv()
             self.remake.set()
             return (b'', 2)
         meta = ChunkMeta(*jsonapi.loads(msg[0]))
@@ -151,6 +152,8 @@ class AudioOutput(AudioStream):
         if (meta.chunksize != self.chunksize) or \
            (meta.channels != self.channels) or \
            (meta.srate != self.srate):
+            self.logger.info('Remote format changed. Signaling for restart.')
+            self.sockstream.stop_on_recv()
             self.remake.set()
             return (b'', 2)
 
@@ -199,6 +202,14 @@ def list_devices():
         print()
 
 
+def remake_stream_loop(iam, device, args):
+    while True:
+        stream = iam(device, args.endpoint, args.channels, args.chunksize,
+                     args.srate, latency_debug=args.latency_debug)
+        stream.remake.wait()
+        logger.info('Recreating audio stream')
+
+
 def main():
     parser = argparse.ArgumentParser()
     in_out = parser.add_mutually_exclusive_group(required=True)
@@ -245,12 +256,12 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
+    threading.Thread(target=remake_stream_loop, name='remake_stream_loop',
+                     args=(iam, device, args), daemon=True).start()
+
     try:
         while True:
-            stream = iam(device, args.endpoint, args.channels, args.chunksize,
-                         args.srate, latency_debug=args.latency_debug)
-            stream.remake.wait()
-            logger.info('Recreating audio stream')
+            time.sleep(1)
     except KeyboardInterrupt:
         print()
 
