@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import zmq
+import zmq.eventloop.ioloop as ioloop
+import zmq.eventloop.zmqstream as zmqstream
 import zmq.utils.jsonapi as jsonapi
 
 ChunkMeta = namedtuple('ChunkMeta',
@@ -94,11 +96,6 @@ class AudioOutput(AudioStream):
         self.latency_log = None
         if 'latency_debug' in kwargs and kwargs['latency_debug']:
             self.latency_log = list()
-            self.callback_q = queue.Queue()
-            self.callback_th = threading.Thread(
-                target=self._callback_runner, name='AudioOutput.Callbacks',
-                args=(self.callback_q,), daemon=True)
-            self.callback_th.start()
 
         self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.sock = ctx.socket(zmq.SUB)
@@ -115,7 +112,23 @@ class AudioOutput(AudioStream):
         self.channels = meta.channels
         self.srate = meta.srate
         self.seq = meta.seq
+
+        self.chunk_q = queue.Queue(1)
+        self.ioloop = ioloop.ZMQIOLoop()
+        self.sockstream = zmqstream.ZMQStream(self.sock, self.ioloop)
+        self.sockstream.on_recv(self._enqueue)
+        self.ioloop_th = threading.Thread(
+            target=lambda loop: loop.start(),
+            name='AudioOutput.IOLoop', args=(self.ioloop,), daemon=True)
+        self.ioloop_th.start()
+
         self._open_stream('output')
+
+    def _enqueue(self, msg):
+        try:
+            self.chunk_q.put(msg, False)
+        except queue.Full:
+            self.logger.warning('_enqueue() dropped a chunk.')
 
     def __call__(self, _, nframes, time_info, status):
         if status != 0:
@@ -123,7 +136,8 @@ class AudioOutput(AudioStream):
                 self.logger.warning('Status: underflow')
             elif status & 10:
                 self.logger.warning('Status: overflow')
-        msg = self.sock.recv_multipart()
+
+        msg = self.chunk_q.get()
         if len(msg[1]) == 0:
             self.remake.set()
             return (b'', 2)
@@ -142,16 +156,10 @@ class AudioOutput(AudioStream):
         if self.latency_log is not None:
             self.latency_log.append(time_info['output_buffer_dac_time'] - meta.adc_time)
             if len(self.latency_log)*self.chunksize >= self.srate*5:
-                self.callback_q.put(
-                    (self._latency_report, (self.latency_log,), dict()))
+                self.ioloop.add_callback(self._latency_report, self.latency_log)
                 self.latency_log = list()
         data = np.frombuffer(msg[1], dtype=meta.dtype).reshape((-1, meta.channels))
         return (data.astype(np.float32), 0)
-
-    def _callback_runner(self, q):
-        while True:
-            fn, args, kwargs = q.get()
-            fn(*args, **kwargs)
 
     def _latency_report(self, log):
         arr = np.array(log)
