@@ -11,28 +11,33 @@ import sys
 import threading
 import time
 import zmq
-import zmq.eventloop.ioloop as ioloop
-import zmq.eventloop.zmqstream as zmqstream
+from zmq.eventloop import ioloop, zmqstream
 import zmq.utils.jsonapi as jsonapi
 
 ChunkMeta = namedtuple('ChunkMeta',
                        ['seq', 'chunksize', 'channels', 'dtype', 'srate',
-                       'adc_time', 'input_call_time'])
+                        'adc_time', 'input_call_time'])
 
-logging.basicConfig(format='%(mtime).9f - %(name)s.%(levelname)s:  %(message)s',
-                    level=logging.DEBUG)
+logging.basicConfig(
+    format='%(mtime).9f - %(name)s.%(levelname)s:  %(message)s',
+    level=logging.DEBUG)
 
 old_factory = logging.getLogRecordFactory()
+
+
 def record_factory(*args, **kwargs):
     record = old_factory(*args, **kwargs)
     record.mtime = time.monotonic()
     return record
+
 logging.setLogRecordFactory(record_factory)
 
 logger = logging.getLogger(os.path.basename(__file__).rpartition('.')[0])
 
+
 ctx = zmq.Context()
 pa = pyaudio.PyAudio()
+
 
 class AudioStream:
     def __init__(self, device, endpoint, channels, chunksize, srate):
@@ -65,6 +70,7 @@ class AudioStream:
         self.logger.info('Audio stream reported %s latency: %.3f ms (%.1f samples)',
                          in_out, latency*1000, latency*self.srate)
 
+
 class AudioInput(AudioStream):
     def __init__(self, *args, **_):
         super().__init__(*args)
@@ -88,6 +94,7 @@ class AudioInput(AudioStream):
         self.sock.send_multipart([jsonapi.dumps(meta), data])
         self.chunk_seq += 1
         return (None, 0)
+
 
 class AudioOutput(AudioStream):
     def __init__(self, *args, **kwargs):
@@ -114,13 +121,11 @@ class AudioOutput(AudioStream):
         self.seq = meta.seq
 
         self.chunk_q = queue.Queue(1)
-        self.ioloop = ioloop.ZMQIOLoop()
+        self.ioloop = ioloop.ZMQIOLoop(time_func=time.monotonic)
         self.sockstream = zmqstream.ZMQStream(self.sock, self.ioloop)
         self.sockstream.on_recv(self._enqueue)
-        self.ioloop_th = threading.Thread(
-            target=lambda loop: loop.start(),
-            name='AudioOutput.IOLoop', args=(self.ioloop,), daemon=True)
-        self.ioloop_th.start()
+        threading.Thread(target=lambda loop: loop.start(), name='AudioOutput.IOLoop',
+                         args=(self.ioloop,), daemon=True).start()
 
         self._open_stream('output')
 
@@ -178,10 +183,10 @@ def list_devices():
     n = pa.get_device_count()
     devices = [pa.get_device_info_by_index(i) for i in range(n)]
     for device in devices:
-        i = device['index']; name = device['name']
-        ch_in = device['maxInputChannels']; ch_out = device['maxOutputChannels']
+        i, name = (device['index'], device['name'])
+        ch_in, ch_out = (device['maxInputChannels'], device['maxOutputChannels'])
         hz = device['defaultSampleRate']
-        l_in = device['defaultLowInputLatency']; l_out = device['defaultLowOutputLatency']
+        l_in, l_out = (device['defaultLowInputLatency'], device['defaultLowOutputLatency'])
         l_in_ms, l_out_ms = (l_in*1000, l_out*1000)
         l_in_hz, l_out_hz = (l_in*hz, l_out*hz)
         print('Device #%d: %s' % (i, name))
@@ -192,6 +197,7 @@ def list_devices():
         if ch_out > 0:
             print('%.3f ms output latency (%.1f samples)' % (l_out_ms, l_out_hz))
         print()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -241,8 +247,8 @@ def main():
 
     try:
         while True:
-            stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate,
-                         latency_debug=args.latency_debug)
+            stream = iam(device, args.endpoint, args.channels, args.chunksize,
+                         args.srate, latency_debug=args.latency_debug)
             stream.remake.wait()
             logger.info('Recreating audio stream')
     except KeyboardInterrupt:
