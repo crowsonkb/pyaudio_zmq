@@ -17,8 +17,16 @@ ChunkMeta = namedtuple('ChunkMeta',
                        ['seq', 'chunksize', 'channels', 'dtype', 'srate',
                        'adc_time', 'input_call_time'])
 
-logging.basicConfig(format='%(name)s.%(levelname)s:  %(message)s',
+logging.basicConfig(format='%(mtime).9f - %(name)s.%(levelname)s:  %(message)s',
                     level=logging.DEBUG)
+
+old_factory = logging.getLogRecordFactory()
+def record_factory(*args, **kwargs):
+    record = old_factory(*args, **kwargs)
+    record.mtime = time.monotonic()
+    return record
+logging.setLogRecordFactory(record_factory)
+
 logger = logging.getLogger(os.path.basename(__file__).rpartition('.')[0])
 
 ctx = zmq.Context()
@@ -60,12 +68,17 @@ class AudioInput(AudioStream):
         super().__init__(*args)
         self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.chunk_seq = 0
-        self._open_stream('input')
         self.sock = ctx.socket(zmq.PUB)
         self.sock.bind(self.endpoint)
         self.logger.info('Bound to endpoint %s', self.endpoint)
+        self._open_stream('input')
 
     def __call__(self, in_data, nframes, time_info, status):
+        if status != 0:
+            if status & 5:
+                self.logger.warning('Status: underflow')
+            elif status & 10:
+                self.logger.warning('Status: overflow')
         data = np.frombuffer(in_data, dtype=np.float32).reshape((-1, self.channels))
         meta = ChunkMeta(
             self.chunk_seq, data.shape[0], data.shape[1], str(data.dtype), self.srate,
@@ -101,9 +114,15 @@ class AudioOutput(AudioStream):
         self.chunksize = meta.chunksize
         self.channels = meta.channels
         self.srate = meta.srate
+        self.seq = meta.seq
         self._open_stream('output')
 
     def __call__(self, _, nframes, time_info, status):
+        if status != 0:
+            if status & 5:
+                self.logger.warning('Status: underflow')
+            elif status & 10:
+                self.logger.warning('Status: overflow')
         msg = self.sock.recv_multipart()
         if len(msg[1]) == 0:
             self.remake.set()
@@ -115,6 +134,10 @@ class AudioOutput(AudioStream):
            (meta.srate != self.srate):
             self.remake.set()
             return (b'', 2)
+
+        if meta.seq != self.seq + 1:
+            self.logger.warning('Sequence break: expected %d got %d', self.seq+1, meta.seq)
+        self.seq = meta.seq
 
         if self.latency_log is not None:
             self.latency_log.append(time_info['output_buffer_dac_time'] - meta.adc_time)
@@ -131,7 +154,6 @@ class AudioOutput(AudioStream):
             fn(*args, **kwargs)
 
     def _latency_report(self, log):
-        self.logger.debug('It is now: %.9f s', time.monotonic())
         arr = np.array(log)
         lmax = np.max(arr)
         self.logger.debug('Total latency: - Max: %.3f ms (%.1f samples)',
