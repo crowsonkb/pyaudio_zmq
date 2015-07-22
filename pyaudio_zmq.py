@@ -6,8 +6,10 @@ import logging
 import numpy as np
 import os
 import pyaudio
+import queue
 import sys
 import threading
+import time
 import zmq
 import zmq.utils.jsonapi as jsonapi
 
@@ -46,10 +48,16 @@ class AudioStream:
         self.stream = pa.open(self.srate, self.channels, pyaudio.paFloat32,
                               **kwargs)
         self.logger.info('Audio device %d opened for %s', self.device, in_out)
+        if in_out == 'input':
+            latency = self.stream.get_input_latency()
+        elif in_out == 'output':
+            latency = self.stream.get_output_latency()
+        self.logger.info('Audio stream reported %s latency: %.3f ms (%.1f samples)',
+                         in_out, latency*1000, latency*self.srate)
 
 class AudioInput(AudioStream):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, **_):
+        super().__init__(*args)
         self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.chunk_seq = 0
         self._open_stream('input')
@@ -68,12 +76,23 @@ class AudioInput(AudioStream):
 
 class AudioOutput(AudioStream):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args)
+
+        self.latency_log = None
+        if 'latency_debug' in kwargs and kwargs['latency_debug']:
+            self.latency_log = list()
+            self.callback_q = queue.Queue()
+            self.callback_th = threading.Thread(
+                target=self._callback_runner, name='AudioOutput.Callbacks',
+                args=(self.callback_q,), daemon=True)
+            self.callback_th.start()
+
         self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
         self.sock = ctx.socket(zmq.SUB)
         self.sock.subscribe = b''
         self.sock.connect(self.endpoint)
         self.logger.info('Connecting to endpoint %s', self.endpoint)
+
         msg = self.sock.recv_multipart()
         meta = ChunkMeta(*jsonapi.loads(msg[0]))
         self.logger.info(
@@ -97,8 +116,33 @@ class AudioOutput(AudioStream):
             self.remake.set()
             return (b'', 2)
 
+        if self.latency_log is not None:
+            self.latency_log.append(time_info['output_buffer_dac_time'] - meta.adc_time)
+            if len(self.latency_log)*self.chunksize >= self.srate*5:
+                self.callback_q.put(
+                    (self._latency_report, (self.latency_log,), dict()))
+                self.latency_log = list()
         data = np.frombuffer(msg[1], dtype=meta.dtype).reshape((-1, meta.channels))
         return (data.astype(np.float32), 0)
+
+    def _callback_runner(self, q):
+        while True:
+            fn, args, kwargs = q.get()
+            fn(*args, **kwargs)
+
+    def _latency_report(self, log):
+        self.logger.debug('It is now: %.9f s', time.monotonic())
+        arr = np.array(log)
+        lmax = np.max(arr)
+        self.logger.debug('Total latency: - Max: %.3f ms (%.1f samples)',
+                          lmax*1000, lmax*self.srate)
+        lmed = np.median(arr)
+        self.logger.debug('               - Med: %.3f ms (%.1f samples)',
+                          lmed*1000, lmed*self.srate)
+        lmin = np.min(arr)
+        self.logger.debug('               - Min: %.3f ms (%.1f samples)',
+                          lmin*1000, lmin*self.srate)
+
 
 def list_devices():
     n = pa.get_device_count()
@@ -141,6 +185,9 @@ def main():
     parser.add_argument(
         '--srate', type=int, default=48000,
         help='the sample rate to read')
+    parser.add_argument(
+        '--latency-debug', action='store_true',
+        help='print latency debugging statistics (audio outputs only)')
     args = parser.parse_args()
 
     if args.i >= 0:
@@ -164,7 +211,8 @@ def main():
 
     try:
         while True:
-            stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate)
+            stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate,
+                         latency_debug=args.latency_debug)
             stream.remake.wait()
             logger.info('Recreating audio stream')
     except KeyboardInterrupt:
