@@ -2,6 +2,7 @@
 
 import argparse
 from collections import namedtuple
+import logging
 import numpy as np
 import pyaudio
 import sys
@@ -12,6 +13,10 @@ import zmq.utils.jsonapi as jsonapi
 ChunkMeta = namedtuple('ChunkMeta',
                        ['seq', 'chunksize', 'channels', 'dtype', 'srate',
                        'adc_time', 'input_call_time'])
+
+logging.basicConfig(format='%(name)s.%(levelname)s:  %(message)s',
+                    level=logging.DEBUG)
+logger = logging.getLogger('pyaudio_zmq')
 
 ctx = zmq.Context()
 pa = pyaudio.PyAudio()
@@ -24,6 +29,7 @@ class AudioStream:
         self.chunksize = chunksize
         self.srate = srate
         self.stream = None
+        self.logger = None
         self.remake = threading.Event()
 
     def __call__(self, _, __, ___, ____):
@@ -38,14 +44,17 @@ class AudioStream:
         kwargs['%s_host_api_specific_stream_info' % in_out] = stream_info
         self.stream = pa.open(self.srate, self.channels, pyaudio.paFloat32,
                               **kwargs)
+        self.logger.info('Audio device %d opened for %s', self.device, in_out)
 
 class AudioInput(AudioStream):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.logger = logging.getLogger('pyaudio_zmq.AudioInput')
         self.chunk_seq = 0
         self._open_stream('input')
         self.sock = ctx.socket(zmq.PUB)
         self.sock.bind(self.endpoint)
+        self.logger.info('Bound to endpoint %s', self.endpoint)
 
     def __call__(self, in_data, nframes, time_info, status):
         data = np.frombuffer(in_data, dtype=np.float32).reshape((-1, self.channels))
@@ -59,11 +68,16 @@ class AudioInput(AudioStream):
 class AudioOutput(AudioStream):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.logger = logging.getLogger('pyaudio_zmq.AudioOutput')
         self.sock = ctx.socket(zmq.SUB)
         self.sock.subscribe = b''
         self.sock.connect(self.endpoint)
+        self.logger.info('Connecting to endpoint %s', self.endpoint)
         msg = self.sock.recv_multipart()
         meta = ChunkMeta(*jsonapi.loads(msg[0]))
+        self.logger.info(
+            'Detected remote format: chunksize=%d channels=%d srate=%d',
+            meta.chunksize, meta.channels, meta.srate)
         self.chunksize = meta.chunksize
         self.channels = meta.channels
         self.srate = meta.srate
@@ -151,6 +165,7 @@ def main():
         while True:
             stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate)
             stream.remake.wait()
+            logger.info('Recreating audio stream')
     except KeyboardInterrupt:
         pass
 
