@@ -101,7 +101,7 @@ class AudioOutput(AudioStream):
         super().__init__(*args)
 
         self.latency_log = None
-        if 'latency_debug' in kwargs and kwargs['latency_debug']:
+        if kwargs['latency_debug']:
             self.latency_log = list()
 
         self.logger = logging.getLogger(logger.name+'.'+self.__class__.__name__)
@@ -120,7 +120,7 @@ class AudioOutput(AudioStream):
         self.srate = meta.srate
         self.seq = meta.seq
 
-        self.chunk_q = queue.Queue(1)
+        self.chunk_q = queue.Queue(kwargs['max_buffer']//self.chunksize + 1)
         self.ioloop = ioloop.ZMQIOLoop(time_func=time.monotonic)
         self.sockstream = zmqstream.ZMQStream(self.sock, self.ioloop)
         self.sockstream.on_recv(self._enqueue)
@@ -204,8 +204,8 @@ def list_devices():
 
 def remake_stream_loop(iam, device, args):
     while True:
-        stream = iam(device, args.endpoint, args.channels, args.chunksize,
-                     args.srate, latency_debug=args.latency_debug)
+        stream = iam(device, args.endpoint, args.channels, args.chunksize, args.srate,
+                     max_buffer=args.max_buffer, latency_debug=args.latency_debug)
         stream.remake.wait()
         logger.info('Recreating audio stream')
 
@@ -215,23 +215,28 @@ def main():
     in_out = parser.add_mutually_exclusive_group(required=True)
     in_out.add_argument(
         '-i', type=int, default=-1,
-        help='read from specified audio device number')
+        help='read from the specified audio device number')
     in_out.add_argument(
         '-o', type=int, default=-1,
-        help='write to specified audio device number')
+        help='write to the specified audio device number')
     in_out.add_argument(
         '-l', action='store_true', help='list audio devices on this system')
     parser.add_argument(
-        'endpoint', nargs='?', help='the ZMQ endpoint to bind/connect to')
+        'endpoint', nargs='?',
+        help='the ZMQ endpoint to bind/connect to (e.g. ipc://socket.ipc)')
     parser.add_argument(
         '--channels', type=int, default=2,
-        help='the number of audio channels to read')
+        help='the number of audio channels to read (default = 2)')
     parser.add_argument(
         '--chunksize', type=int, default=256,
-        help='the number of frames to read at once')
+        help='the number of frames to read at once (default = 256)')
     parser.add_argument(
         '--srate', type=int, default=48000,
-        help='the sample rate to read')
+        help='the sample rate to read at (default = 48000)')
+    parser.add_argument(
+        '--max-buffer', type=int, default=0,
+        help='the maximum number of frames AudioOutput is allowed to buffer'
+        ' (default = 0, -1 means no limit)')
     parser.add_argument(
         '--latency-debug', action='store_true',
         help='print latency debugging statistics (audio outputs only)')
